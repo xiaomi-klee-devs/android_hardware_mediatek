@@ -396,96 +396,6 @@ static int wpa_driver_nl80211_driver_sw_cmd(void* priv, int set, u32* adr, u32* 
     return 0;
 }
 
-#ifdef CONFIG_WAPI_SUPPORT
-int wpa_driver_nl80211_set_wapi_key(void* priv, const u8* addr, int key_idx, int set_tx,
-                                    const u8* seq, size_t seq_len, const u8* key, size_t key_len) {
-    struct i802_bss* bss = priv;
-    struct wpa_driver_nl80211_data* drv = bss->drv;
-    struct nl_msg *msg, *cqm = NULL;
-    struct wpa_driver_wapi_key_params params;
-    int ret = 0;
-
-    os_memset(&params, 0, sizeof(params));
-
-    params.hdr.index = NL80211_TESTMODE_WAPI;
-    params.hdr.index = params.hdr.index | (0x01 << 24);
-    params.hdr.buflen = sizeof(struct wpa_driver_wapi_key_params);
-
-    wpa_printf(MSG_DEBUG, "[WAPI-DEBUG]1 %s: ", __FUNCTION__);
-
-    if (seq_len > IW_ENCODE_SEQ_MAX_SIZE * 2) {
-        wpa_printf(MSG_DEBUG, "[WAPI-DEBUG]%s: Invalid seq_len %lu", __FUNCTION__,
-                   (unsigned long)seq_len);
-        return -1;
-    }
-
-    params.key_index = key_idx + 1;
-    params.key_len = key_len;
-
-    if (addr == NULL || os_memcmp(addr, "\xff\xff\xff\xff\xff\xff", ETH_ALEN) == 0)
-        params.extparams.ext_flags |= IW_ENCODE_EXT_GROUP_KEY;
-    if (set_tx) params.extparams.ext_flags |= IW_ENCODE_EXT_SET_TX_KEY;
-
-    if (addr)
-        os_memcpy(params.extparams.addr, addr, ETH_ALEN);
-    else
-        os_memset(params.extparams.addr, 0xff, ETH_ALEN);
-
-    if (key && key_len > 0 && key_len <= 32) {
-        os_memcpy(params.extparams.key, key, key_len);
-        params.extparams.key_len = key_len;
-    }
-
-    wpa_printf(MSG_DEBUG, "[WAPI-DEBUG]2 %s:", __FUNCTION__);
-
-    wpa_printf(MSG_DEBUG, "%s: Set IW_ENCODE_ALG_SMS4 to ext->alg", __FUNCTION__);
-
-    params.extparams.alg = IW_ENCODE_ALG_SMS4;
-
-    wpa_printf(MSG_DEBUG, "[WAPI-DEBUG]3 %s: ", __FUNCTION__);
-
-    if (seq && seq_len && seq_len > IW_ENCODE_SEQ_MAX_SIZE) {
-        os_memcpy(params.extparams.tx_seq, seq, IW_ENCODE_SEQ_MAX_SIZE);
-        os_memcpy(params.extparams.rx_seq, seq + IW_ENCODE_SEQ_MAX_SIZE,
-                  seq_len - IW_ENCODE_SEQ_MAX_SIZE);
-    } else if (seq && seq_len && seq_len <= IW_ENCODE_SEQ_MAX_SIZE) {
-        os_memcpy(params.extparams.tx_seq, seq, seq_len);
-    }
-    wpa_hexdump(MSG_DEBUG, "seq", seq, seq_len);
-
-    wpa_printf(MSG_DEBUG, "[WAPI-DEBUG]4 Copy buffer %s: ", __FUNCTION__);
-
-    wpa_driver_nl80211_testmode(priv, (u8*)&params, sizeof(struct wpa_driver_wapi_key_params));
-
-    return 0;
-}
-
-/**
- * wpa_driver_nl80211_send_msg - send some information to driver
- * @priv: private driver interface data from init()
- * @msg_in: the message sent to driver
- * @msg_in_len: the length of sent message
- * @msg_out: the message given back from driver
- * @msg_out_len: the length of message given back from driver
- *
- * Returns: 0 on success, -1 on failure
- *
- */
-static int wpa_driver_nl80211_send_msg(void* priv, const u8* msg_in, int msg_in_len, u8* msg_out,
-                                       int* msg_out_len) {
-    struct i802_bss* bss = priv;
-    struct wpa_driver_nl80211_data* drv = bss->drv;
-    int ret = 0;
-
-    if (msg_in_len > 1024) {
-        wpa_printf(MSG_DEBUG, "wpa_driver_nl80211_send_msg: msg too long");
-        return -1;
-    }
-
-    return ret;
-}
-#endif /* CONFIG_WAPI_SUPPORT */
-
 static inline int wpa_drv_set_test_mode(struct wpa_supplicant* wpa_s, const u8* buf,
                                         size_t buf_len) {
     return wpa_driver_nl80211_testmode(wpa_s->drv_priv, buf, buf_len);
@@ -1234,35 +1144,6 @@ int wpa_driver_nl80211_driver_cmd(void* priv, char* cmd_src, char* buf, size_t b
         ret = 0; /* mt5921 linux driver not implement yet */
     } else if (os_strncasecmp(cmd, "btcoexmode", 10) == 0) {
         ret = 0; /* mt5921 linux driver not implement yet */
-#ifdef CONFIG_WAPI_SUPPORT
-    } else if (os_strncasecmp(cmd, "set-wapi-key", 12) == 0) {
-        struct wapi_key_param_type {
-            u8* addr;
-            int key_idx;
-            int set_tx;
-            u8* seq;
-            size_t seq_len;
-            u8* key;
-            size_t key_len;
-        }* wapi_key_param;
-        wapi_key_param = (struct wapi_key_param_type*)buf;
-
-        ret = wpa_driver_nl80211_set_wapi_key(
-                priv, (const u8*)wapi_key_param->addr, wapi_key_param->key_idx,
-                wapi_key_param->set_tx, (const u8*)wapi_key_param->seq, wapi_key_param->seq_len,
-                (const u8*)wapi_key_param->key, wapi_key_param->key_len);
-    } else if (os_strncasecmp(cmd, "wapi-msg-send", 13) == 0) {
-        struct wapi_msg_send_param_type {
-            u8* msg_in;
-            int msg_in_len;
-            u8* msg_out;
-            int* msg_out_len;
-        }* wapi_msg_send_param;
-        wapi_msg_send_param = (struct wapi_msg_send_param_type*)buf;
-        ret = wpa_driver_nl80211_send_msg(
-                priv, (const u8*)wapi_msg_send_param->msg_in, wapi_msg_send_param->msg_in_len,
-                wapi_msg_send_param->msg_out, wapi_msg_send_param->msg_out_len);
-#endif /* CONFIG_WAPI_SUPPORT */
     } else if (os_strncmp(cmd, "HAPD_GET_CHANNEL ", os_strlen("HAPD_GET_CHANNEL ")) == 0) {
         cmd_len = strlen(cmd);
         memset(&ifr, 0, sizeof(ifr));
