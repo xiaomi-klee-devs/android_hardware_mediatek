@@ -8,6 +8,7 @@
 
 #include <linux/wireless.h>
 
+#undef BITS
 #ifndef BITS
 /* bits range: for example BITS(16,23) = 0xFF0000
  *   ==>  (BIT(m)-1)   = 0x0000FFFF     ~(BIT(m)-1)   => 0xFFFF0000
