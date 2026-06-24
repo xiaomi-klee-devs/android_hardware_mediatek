@@ -8,6 +8,7 @@
 
 #include <linux/wireless.h>
 
+#undef BITS
 #ifndef BITS
 /* Eddie */
 /* bits range: for example BITS(16,23) = 0xFF0000
