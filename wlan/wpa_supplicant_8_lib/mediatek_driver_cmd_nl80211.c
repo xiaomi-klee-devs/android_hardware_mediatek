@@ -411,11 +411,18 @@ extern int wpa_config_write(const char* name, struct wpa_config* config);
 
 static int wpa_driver_mediatek_set_country(void* priv, const char* alpha2_arg) {
     struct i802_bss* bss = priv;
-    struct wpa_driver_nl80211_data* drv = bss->drv;
+    struct wpa_driver_nl80211_data* drv;
     int ioctl_sock = -1;
     struct iwreq iwr;
     int ret = -1;
     char buf[11];
+
+    if (!bss || !bss->drv || !alpha2_arg || os_strlen(alpha2_arg) < 2) {
+        wpa_printf(MSG_ERROR, "%s: invalid args", __func__);
+        return -EINVAL;
+    }
+
+    drv = bss->drv;
 
     ioctl_sock = socket(PF_INET, SOCK_DGRAM, 0);
     if (ioctl_sock < 0) {
@@ -423,13 +430,15 @@ static int wpa_driver_mediatek_set_country(void* priv, const char* alpha2_arg) {
         return -1;
     }
     os_memset(&iwr, 0, sizeof(iwr));
-    os_strlcpy(iwr.ifr_name, drv->first_bss->ifname, IFNAMSIZ);
-    ret = snprintf(buf, sizeof(buf), "COUNTRY %s", alpha2_arg);
-    if (ret < 0 || ret > sizeof(buf)) {
+    os_strlcpy(iwr.ifr_name, bss->ifname, IFNAMSIZ);
+    ret = snprintf(buf, sizeof(buf), "COUNTRY %.2s", alpha2_arg);
+    if (ret < 0 || ret >= (int)sizeof(buf)) {
         wpa_printf(MSG_DEBUG, "%s: snprintf failed:%d", __func__, ret);
+        close(ioctl_sock);
+        return -EINVAL;
     }
     iwr.u.data.pointer = buf;
-    iwr.u.data.length = strlen(buf);
+    iwr.u.data.length = strlen(buf) + 1;
     if ((ret = ioctl(ioctl_sock, 0x8B0C, &iwr)) < 0) {  // SIOCSIWPRIV
         wpa_printf(MSG_DEBUG, "ioctl[SIOCSIWPRIV]: %s", buf);
         close(ioctl_sock);
