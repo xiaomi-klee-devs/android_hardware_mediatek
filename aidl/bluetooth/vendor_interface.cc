@@ -281,7 +281,8 @@ void VendorInterface::Close() {
   }
 
   if (lib_interface_ != nullptr) {
-    lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, nullptr);
+    uint8_t close_reason = 0;
+    lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, &close_reason);
 
     int power_state = BT_VND_PWR_OFF;
     lib_interface_->op(BT_VND_OP_POWER_CTRL, &power_state);
