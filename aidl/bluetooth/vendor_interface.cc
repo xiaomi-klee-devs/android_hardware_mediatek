@@ -24,6 +24,8 @@
 #include <utils/Log.h>
 
 #include <iostream>
+#include <mutex>
+#include <utility>
 
 #include "bluetooth_address.h"
 #include "h4_protocol.h"
@@ -51,7 +53,9 @@ bool lpm_wake_deasserted;
 uint32_t lpm_timeout_ms;
 bool recent_activity_flag;
 
-VendorInterface* g_vendor_interface = nullptr;
+std::mutex g_vendor_interface_mutex;
+// Keep the instance alive while a vendor callback or HCI send is in flight.
+std::shared_ptr<VendorInterface> g_vendor_interface;
 std::mutex wakeup_mutex_;
 
 HC_BT_HDR* WrapPacketAndCopy(uint16_t event, const std::vector<uint8_t>& data) {
@@ -89,14 +93,27 @@ uint8_t transmit_cb(uint16_t opcode, void* buffer, tINT_CMD_CBACK callback) {
     internal_command.cb = callback;
     internal_command.opcode = opcode;
     HC_BT_HDR* bt_hdr = reinterpret_cast<HC_BT_HDR*>(buffer);
-    VendorInterface::get()->Send(PacketType::COMMAND, bt_hdr->data, bt_hdr->len);
+    auto vendor_interface = VendorInterface::get();
+    if (vendor_interface == nullptr) {
+        ALOGE("%s: Vendor interface is closed", __func__);
+        delete[] reinterpret_cast<uint8_t*>(buffer);
+        return false;
+    }
+    vendor_interface->Send(PacketType::COMMAND, bt_hdr->data, bt_hdr->len);
     delete[] reinterpret_cast<uint8_t*>(buffer);
     return true;
 }
 
 void firmware_config_cb(bt_vendor_op_result_t result) {
-    ALOGV("%s result: %d", __func__, result);
-    VendorInterface::get()->OnFirmwareConfigured(result);
+    if (result != 0) {
+        ALOGW("%s result: %d", __func__, result);
+    } else {
+        ALOGV("%s result: %d", __func__, result);
+    }
+    auto vendor_interface = VendorInterface::get();
+    if (vendor_interface != nullptr) {
+        vendor_interface->OnFirmwareConfigured(result);
+    }
 }
 
 void sco_config_cb(bt_vendor_op_result_t result) {
@@ -159,23 +176,50 @@ bool VendorInterface::Initialize(InitializeCompleteCallback initialize_complete_
                                  PacketReadCallback cmd_cb, PacketReadCallback acl_cb,
                                  PacketReadCallback sco_cb, PacketReadCallback event_cb,
                                  PacketReadCallback iso_cb, DisconnectCallback disconnect_cb) {
-    if (g_vendor_interface) {
-        ALOGE("%s: No previous Shutdown()?", __func__);
+    auto vendor_interface = std::make_shared<VendorInterface>();
+    {
+        std::lock_guard<std::mutex> guard(g_vendor_interface_mutex);
+        if (g_vendor_interface) {
+            ALOGE("%s: No previous Shutdown()?", __func__);
+            return false;
+        }
+        g_vendor_interface = vendor_interface;
+    }
+
+    if (!vendor_interface->Open(initialize_complete_cb, cmd_cb, acl_cb, sco_cb, event_cb, iso_cb,
+                                disconnect_cb)) {
+        {
+            std::lock_guard<std::mutex> guard(g_vendor_interface_mutex);
+            if (g_vendor_interface == vendor_interface) {
+                g_vendor_interface.reset();
+            }
+        }
+        vendor_interface->Close();
         return false;
     }
-    g_vendor_interface = new VendorInterface();
-    return g_vendor_interface->Open(initialize_complete_cb, cmd_cb, acl_cb, sco_cb, event_cb,
-                                    iso_cb, disconnect_cb);
+    return true;
 }
 
 void VendorInterface::Shutdown() {
-    LOG_ALWAYS_FATAL_IF(!g_vendor_interface, "%s: No Vendor interface!", __func__);
-    g_vendor_interface->Close();
-    delete g_vendor_interface;
-    g_vendor_interface = nullptr;
+    std::shared_ptr<VendorInterface> vendor_interface;
+    {
+        std::lock_guard<std::mutex> guard(g_vendor_interface_mutex);
+        vendor_interface = std::move(g_vendor_interface);
+    }
+
+    if (vendor_interface == nullptr) {
+        ALOGW("%s: Vendor interface is already closed", __func__);
+        return;
+    }
+    vendor_interface->Close();
 }
 
-VendorInterface* VendorInterface::get() {
+VendorInterface::~VendorInterface() {
+    Close();
+}
+
+std::shared_ptr<VendorInterface> VendorInterface::get() {
+    std::lock_guard<std::mutex> guard(g_vendor_interface_mutex);
     return g_vendor_interface;
 }
 
@@ -183,7 +227,11 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
                            PacketReadCallback cmd_cb, PacketReadCallback acl_cb,
                            PacketReadCallback sco_cb, PacketReadCallback event_cb,
                            PacketReadCallback iso_cb, DisconnectCallback disconnect_cb) {
-    initialize_complete_cb_ = initialize_complete_cb;
+    {
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        closed_ = false;
+        initialize_complete_cb_ = initialize_complete_cb;
+    }
 
     // Initialize vendor interface
 
@@ -203,7 +251,7 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
 
     // Get the local BD address
 
-    uint8_t local_bda[BluetoothAddress::kBytes];
+    uint8_t local_bda[BluetoothAddress::kBytes] = {};
     if (!BluetoothAddress::get_local_address(local_bda)) {
         ALOGW("%s: No pre-set Bluetooth Address!", __func__);
     }
@@ -252,13 +300,26 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
     lpm_wake_deasserted = true;
 
     // Start configuring the firmware
-    firmware_startup_timer_ = new FirmwareStartupTimer();
+    {
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        firmware_startup_timer_ = new FirmwareStartupTimer();
+    }
     lib_interface_->op(BT_VND_OP_FW_CFG, nullptr);
 
     return true;
 }
 
 void VendorInterface::Close() {
+    {
+        std::lock_guard<std::recursive_mutex> guard(mutex_);
+        if (closed_) {
+            return;
+        }
+        closed_ = true;
+        internal_command.cb = nullptr;
+        internal_command.opcode = 0;
+    }
+
     // These callbacks may send HCI events (vendor-dependent), so make sure to
     // StopWatching the file descriptor after this.
     if (lib_interface_ != nullptr) {
@@ -296,6 +357,14 @@ void VendorInterface::Close() {
 }
 
 size_t VendorInterface::Send(PacketType type, const uint8_t* data, size_t length) {
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (closed_ || hci_ == nullptr || lib_interface_ == nullptr) {
+        ALOGE("%s: Vendor interface is not ready", __func__);
+        internal_command.cb = nullptr;
+        internal_command.opcode = 0;
+        return 0;
+    }
+
     std::unique_lock<std::mutex> lock(wakeup_mutex_);
     recent_activity_flag = true;
 
@@ -314,16 +383,36 @@ size_t VendorInterface::Send(PacketType type, const uint8_t* data, size_t length
 }
 
 void VendorInterface::OnFirmwareConfigured(uint8_t result) {
-    ALOGD("%s result: %d", __func__, result);
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (closed_ || lib_interface_ == nullptr) {
+        ALOGW("%s: Firmware result received after close: %d", __func__, result);
+        return;
+    }
+
+    if (result != 0) {
+        ALOGW("%s result: %d", __func__, result);
+    } else {
+        ALOGD("%s result: %d", __func__, result);
+    }
 
     if (firmware_startup_timer_ != nullptr) {
         delete firmware_startup_timer_;
         firmware_startup_timer_ = nullptr;
     }
 
-    if (initialize_complete_cb_ != nullptr) {
-        initialize_complete_cb_(result == 0);
-        initialize_complete_cb_ = nullptr;
+    if (initialize_complete_cb_ == nullptr) {
+        ALOGW("%s: Ignoring duplicate or late firmware result: %d", __func__, result);
+        return;
+    }
+
+    if (result != 0) {
+        // The client will terminate on this error. Its death link performs the
+        // vendor teardown after this callback returns, so do not touch LPM here.
+        auto initialize_complete_cb = std::move(initialize_complete_cb_);
+        if (initialize_complete_cb != nullptr) {
+            initialize_complete_cb(false);
+        }
+        return;
     }
 
     lib_interface_->op(BT_VND_OP_GET_LPM_IDLE_TIMEOUT, &lpm_timeout_ms);
@@ -335,10 +424,20 @@ void VendorInterface::OnFirmwareConfigured(uint8_t result) {
     ALOGD("%s Calling StartLowPowerWatchdog()", __func__);
     fd_watcher_.ConfigureTimeout(std::chrono::milliseconds(lpm_timeout_ms),
                                  [this]() { OnTimeout(); });
+
+    auto initialize_complete_cb = std::move(initialize_complete_cb_);
+    if (initialize_complete_cb != nullptr) {
+        initialize_complete_cb(true);
+    }
 }
 
 void VendorInterface::OnTimeout() {
     ALOGV("%s", __func__);
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (closed_ || lib_interface_ == nullptr) {
+        return;
+    }
+
     std::unique_lock<std::mutex> lock(wakeup_mutex_);
     if (recent_activity_flag == false) {
         lpm_wake_deasserted = true;
@@ -351,6 +450,11 @@ void VendorInterface::OnTimeout() {
 }
 
 void VendorInterface::HandleIncomingEvent(const std::vector<uint8_t>& hci_packet) {
+    std::lock_guard<std::recursive_mutex> guard(mutex_);
+    if (closed_) {
+        return;
+    }
+
     if (internal_command.cb != nullptr && internal_command_event_match(hci_packet)) {
         HC_BT_HDR* bt_hdr = WrapPacketAndCopy(static_cast<uint16_t>(PacketType::EVENT), hci_packet);
 
