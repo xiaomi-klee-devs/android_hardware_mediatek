@@ -247,6 +247,7 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
         fd_watcher_.WatchFdForNonBlockingReads(fd_list[0],
                                                [h4_hci](int) { h4_hci->OnDataReady(); });
         hci_ = h4_hci;
+        userial_fd_ = fd_list[0];
     }
 
     // Initially, the power management is off.
@@ -272,7 +273,7 @@ void VendorInterface::Close() {
     if (hci_ != nullptr) {
         delete hci_;
         hci_ = nullptr;
-        lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, nullptr);
+        lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, &userial_fd_);
     }
 
     if (lib_interface_ != nullptr) {

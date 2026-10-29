@@ -67,6 +67,7 @@ class VendorInterface {
     AsyncFdWatcher fd_watcher_;
     InitializeCompleteCallback initialize_complete_cb_;
     H4Protocol* hci_ = nullptr;
+    int userial_fd_ = -1;
 
     PacketReadCallback event_cb_;
 
