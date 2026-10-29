@@ -210,6 +210,7 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
     int status = lib_interface_->init(&lib_callbacks, (unsigned char*)local_bda);
     if (status) {
         ALOGE("%s unable to initialize vendor library: %d", __func__, status);
+        lib_interface_ = nullptr;
         return false;
     }
 
@@ -271,11 +272,10 @@ void VendorInterface::Close() {
     if (hci_ != nullptr) {
         delete hci_;
         hci_ = nullptr;
+        lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, nullptr);
     }
 
     if (lib_interface_ != nullptr) {
-        lib_interface_->op(BT_VND_OP_USERIAL_CLOSE, nullptr);
-
         int power_state = BT_VND_PWR_OFF;
         lib_interface_->op(BT_VND_OP_POWER_CTRL, &power_state);
 
